@@ -131,7 +131,7 @@ layout = dbc.Container([
     ], className="mb-4"),
     
     dcc.Store(id="current-modal-store"),
-    dcc.Store(id="baseline-modal-store"),
+    dcc.Store(id="damage-baseline-modal-store"),
     dcc.Store(id="damage-indices-store"),
     html.Div(id="damage-notifications"),
 ], fluid=True)
@@ -182,7 +182,7 @@ def load_current_modal(event_id):
 
 
 @callback(
-    Output("baseline-modal-store", "data"),
+    Output("damage-baseline-modal-store", "data"),
     Output("damage-baseline-selector", "value"),
     Input("damage-bridge-selector", "value"),
     Input("damage-baseline-selector", "value"),
@@ -257,7 +257,7 @@ def update_temp_model_info(enabled, bridge_id):
     State("damage-event-selector", "value"),
     State("damage-baseline-selector", "value"),
     State("current-modal-store", "data"),
-    State("baseline-modal-store", "data"),
+    State("damage-baseline-modal-store", "data"),
     State("enable-temp-comp", "value"),
     State("flexibility-modes", "value"),
     prevent_initial_call=True,

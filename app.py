@@ -119,17 +119,8 @@ def on_global_bridge_change(bridge_id, current_store):
     return store_data, msg
 
 
-@callback(
-    Output("global-bridge-selector", "value"),
-    Input("current-bridge-store", "data"),
-    State("global-bridge-selector", "value"),
-)
-def sync_bridge_selector(store_data, current_value):
-    if store_data and store_data.get("id"):
-        if store_data["id"] != current_value:
-            return store_data["id"]
-    return current_value
+
 
 
 if __name__ == "__main__":
-    app.run_server(debug=True, host='0.0.0.0', port=8050)
+    app.run(debug=True, host='0.0.0.0', port=8050)
