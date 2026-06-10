@@ -80,9 +80,11 @@ layout = dbc.Container([
 @callback(
     Output("bridge-stats", "children"),
     Output("home-bridge-selector", "options"),
-    Input("home-bridge-selector", "value"),
+    Input("home-refresh-trigger", "data"),
+    Input("current-bridge-store", "data"),
+    State("home-bridge-selector", "options"),
 )
-def update_bridge_stats(selected_bridge_id):
+def update_bridge_stats(_, store_data, current_options):
     bridges = Bridge.list_all()
     n_bridges = len(bridges)
     
@@ -96,27 +98,55 @@ def update_bridge_stats(selected_bridge_id):
 
 
 @callback(
-    Output("current-bridge-info", "children"),
     Output("home-bridge-selector", "value"),
-    Input("home-bridge-selector", "value"),
     Input("current-bridge-store", "data"),
-    State("current-bridge-store", "data"),
+    State("home-bridge-selector", "value"),
 )
-def update_current_bridge(selected_bridge_id, store_data, current_store):
-    ctx = dash.callback_context
-    triggered = ctx.triggered[0]["prop_id"] if ctx.triggered else ""
+def sync_home_bridge_selector(store_data, current_value):
+    if store_data and store_data.get("id"):
+        if store_data["id"] != current_value:
+            return store_data["id"]
+    return dash.no_update
+
+
+@callback(
+    Output("current-bridge-store", "data"),
+    Output("home-refresh-trigger", "data"),
+    Output("bridge-selector-trigger", "data", allow_duplicate=True),
+    Input("home-bridge-selector", "value"),
+    State("current-bridge-store", "data"),
+    State("home-refresh-trigger", "data"),
+    State("bridge-selector-trigger", "data"),
+    prevent_initial_call=True,
+)
+def on_home_bridge_change(bridge_id, current_store, home_trigger, global_trigger):
+    if bridge_id is None:
+        return current_store, home_trigger, global_trigger
     
-    if triggered == "current-bridge-store.data" and store_data:
-        bridge_id = store_data.get("id")
-        if bridge_id:
-            selected_bridge_id = bridge_id
+    bridge = Bridge.load(bridge_id)
+    if bridge is None:
+        return current_store, home_trigger, global_trigger
     
+    store_data = {
+        "id": bridge.id,
+        "name": bridge.name,
+        "baseline_event_id": bridge.baseline_event_id
+    }
+    
+    return store_data, (home_trigger or 0) + 1, (global_trigger or 0) + 1
+
+
+@callback(
+    Output("current-bridge-info", "children"),
+    Input("home-bridge-selector", "value"),
+)
+def update_current_bridge_info(selected_bridge_id):
     if selected_bridge_id is None:
-        return html.P("请先选择一座桥梁"), None
+        return html.P("请先选择一座桥梁", className="text-muted")
     
     bridge = Bridge.load(selected_bridge_id)
     if bridge is None:
-        return html.P("桥梁不存在"), None
+        return html.P("桥梁不存在", className="text-danger")
     
     events = TestEvent.list_by_bridge(selected_bridge_id)
     alerts = Alert.load_by_bridge(selected_bridge_id, unacknowledged_only=True)
@@ -124,6 +154,22 @@ def update_current_bridge(selected_bridge_id, store_data, current_store):
     n_sensors = len(bridge.sensors)
     n_events = len(events)
     n_alerts = len(alerts)
+    
+    sensor_rows = []
+    for s in bridge.sensors:
+        try:
+            loc = s.location if len(s.location) == 3 else (0, 0, 0)
+            direction = s.direction if len(s.direction) == 3 else (0, 0, 1)
+        except:
+            loc = (0, 0, 0)
+            direction = (0, 0, 1)
+        sensor_rows.append(html.Tr([
+            html.Td(s.id), html.Td(s.name), 
+            html.Td(s.type.value if hasattr(s.type, 'value') else str(s.type)),
+            html.Td(str(s.channel) if s.channel is not None else "-"),
+            html.Td(f"({loc[0]:.1f}, {loc[1]:.1f}, {loc[2]:.1f})"),
+            html.Td(f"({direction[0]:.1f}, {direction[1]:.1f}, {direction[2]:.1f})")
+        ]))
     
     info = html.Div([
         html.H3(bridge.name, className="text-primary"),
@@ -163,18 +209,11 @@ def update_current_bridge(selected_bridge_id, store_data, current_store):
                 html.Th("测点ID"), html.Th("名称"), html.Th("类型"), 
                 html.Th("通道"), html.Th("位置"), html.Th("方向")
             ])),
-            html.Tbody([
-                html.Tr([
-                    html.Td(s.id), html.Td(s.name), 
-                    html.Td(s.type.value), html.Td(s.channel),
-                    html.Td(f"({s.location[0]:.1f}, {s.location[1]:.1f}, {s.location[2]:.1f})"),
-                    html.Td(f"({s.direction[0]:.1f}, {s.direction[1]:.1f}, {s.direction[2]:.1f})")
-                ]) for s in bridge.sensors
-            ])
-        ], bordered=True, hover=True, size="sm")
+            html.Tbody(sensor_rows)
+        ], bordered=True, hover=True, size="sm") if len(bridge.sensors) > 0 else html.P("暂无测点，请前往系统配置添加", className="text-muted")
     ])
     
-    return info, selected_bridge_id
+    return info
 
 
 @callback(
@@ -183,7 +222,7 @@ def update_current_bridge(selected_bridge_id, store_data, current_store):
 )
 def update_recent_alerts(selected_bridge_id):
     if selected_bridge_id is None:
-        return html.P("请先选择桥梁")
+        return html.P("请先选择桥梁", className="text-muted")
     
     alerts = Alert.load_by_bridge(selected_bridge_id)
     
@@ -192,16 +231,33 @@ def update_recent_alerts(selected_bridge_id):
     
     alert_rows = []
     for alert in alerts[:10]:
-        level_color = "danger" if alert.level.value == "red" else "warning" if alert.level.value == "yellow" else "info"
-        level_text = "红色预警" if alert.level.value == "red" else "黄色预警" if alert.level.value == "yellow" else "信息"
+        level_val = alert.level.value if hasattr(alert.level, 'value') else str(alert.level)
+        level_color = "danger" if level_val == "red" else "warning" if level_val == "yellow" else "info"
+        level_text = "红色预警" if level_val == "red" else "黄色预警" if level_val == "yellow" else "信息"
+        
+        trigger_time_str = ""
+        if alert.trigger_time:
+            try:
+                trigger_time_str = alert.trigger_time.strftime("%Y-%m-%d %H:%M")
+            except:
+                trigger_time_str = str(alert.trigger_time)
+        
+        try:
+            current_val = f"{float(alert.current_value):.4f}"
+        except:
+            current_val = str(alert.current_value)
+        try:
+            threshold_val = f"{float(alert.threshold):.4f}"
+        except:
+            threshold_val = str(alert.threshold)
         
         alert_rows.append(html.Tr([
-            html.Td(alert.trigger_time.strftime("%Y-%m-%d %H:%M")),
+            html.Td(trigger_time_str),
             html.Td(dbc.Badge(level_text, color=level_color)),
-            html.Td(alert.metric),
-            html.Td(f"{alert.current_value:.4f}"),
-            html.Td(f"{alert.threshold:.4f}"),
-            html.Td(alert.suggestion),
+            html.Td(alert.metric or "-"),
+            html.Td(current_val),
+            html.Td(threshold_val),
+            html.Td(alert.suggestion or "-"),
             html.Td("已确认" if alert.acknowledged else "待处理"),
         ]))
     
@@ -220,11 +276,9 @@ def update_recent_alerts(selected_bridge_id):
     Input("close-create-bridge-modal", "n_clicks"),
     Input("confirm-create-bridge", "n_clicks"),
     State("create-bridge-modal", "is_open"),
-    State("new-bridge-id", "value"),
-    State("new-bridge-name", "value"),
-    State("new-bridge-desc", "value"),
+    prevent_initial_call=True,
 )
-def toggle_create_bridge_modal(n_open, n_close, n_confirm, is_open, bridge_id, bridge_name, bridge_desc):
+def toggle_create_bridge_modal(n_open, n_close, n_confirm, is_open):
     ctx = dash.callback_context
     if not ctx.triggered:
         return is_open
@@ -241,19 +295,25 @@ def toggle_create_bridge_modal(n_open, n_close, n_confirm, is_open, bridge_id, b
 
 @callback(
     Output("home-notifications", "children"),
+    Output("home-refresh-trigger", "data", allow_duplicate=True),
+    Output("bridge-selector-trigger", "data", allow_duplicate=True),
+    Output("current-bridge-store", "data", allow_duplicate=True),
     Input("confirm-create-bridge", "n_clicks"),
     State("new-bridge-id", "value"),
     State("new-bridge-name", "value"),
     State("new-bridge-desc", "value"),
+    State("home-refresh-trigger", "data"),
+    State("bridge-selector-trigger", "data"),
+    State("current-bridge-store", "data"),
     prevent_initial_call=True,
 )
-def create_bridge(n_clicks, bridge_id, bridge_name, bridge_desc):
+def create_bridge(n_clicks, bridge_id, bridge_name, bridge_desc, home_trigger, global_trigger, current_store):
     if not bridge_id or not bridge_name:
-        return dbc.Alert("请填写桥梁ID和名称", color="danger")
+        return dbc.Alert("请填写桥梁ID和名称", color="danger"), home_trigger, global_trigger, current_store
     
     existing = Bridge.load(bridge_id)
     if existing is not None:
-        return dbc.Alert("桥梁ID已存在", color="danger")
+        return dbc.Alert("桥梁ID已存在", color="danger"), home_trigger, global_trigger, current_store
     
     bridge = Bridge(
         id=bridge_id,
@@ -263,4 +323,12 @@ def create_bridge(n_clicks, bridge_id, bridge_name, bridge_desc):
     )
     bridge.save()
     
-    return dbc.Alert(f"桥梁 {bridge_name} 创建成功！", color="success", duration=3000)
+    store_data = {
+        "id": bridge.id,
+        "name": bridge.name,
+        "baseline_event_id": bridge.baseline_event_id
+    }
+    
+    msg = dbc.Alert(f"桥梁 {bridge_name} 创建成功！已自动切换到该桥梁", color="success", duration=4000)
+    
+    return msg, (home_trigger or 0) + 1, (global_trigger or 0) + 1, store_data

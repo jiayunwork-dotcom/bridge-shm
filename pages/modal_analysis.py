@@ -161,11 +161,49 @@ layout = dbc.Container([
 
 @callback(
     Output("modal-bridge-selector", "options"),
-    Input("modal-bridge-selector", "value"),
+    Input("bridge-selector-trigger", "data"),
+    Input("home-refresh-trigger", "data"),
+    Input("config-refresh-trigger", "data"),
 )
-def update_bridge_selector(_):
+def update_bridge_selector(_1, _2, _3):
     bridges = Bridge.list_all()
     return [{"label": b.name, "value": b.id} for b in bridges]
+
+
+@callback(
+    Output("modal-bridge-selector", "value"),
+    Input("current-bridge-store", "data"),
+    State("modal-bridge-selector", "value"),
+)
+def sync_modal_bridge_selector(store_data, current_value):
+    if store_data and store_data.get("id"):
+        if store_data["id"] != current_value:
+            return store_data["id"]
+    return dash.no_update
+
+
+@callback(
+    Output("current-bridge-store", "data", allow_duplicate=True),
+    Output("bridge-selector-trigger", "data", allow_duplicate=True),
+    Output("home-refresh-trigger", "data", allow_duplicate=True),
+    Input("modal-bridge-selector", "value"),
+    State("current-bridge-store", "data"),
+    State("bridge-selector-trigger", "data"),
+    State("home-refresh-trigger", "data"),
+    prevent_initial_call=True,
+)
+def on_modal_bridge_change(bridge_id, current_store, bridge_trigger, home_trigger):
+    if not bridge_id:
+        return current_store, bridge_trigger, home_trigger
+    bridge = Bridge.load(bridge_id)
+    if bridge is None:
+        return current_store, bridge_trigger, home_trigger
+    store_data = {
+        "id": bridge.id,
+        "name": bridge.name,
+        "baseline_event_id": bridge.baseline_event_id
+    }
+    return store_data, (bridge_trigger or 0) + 1, (home_trigger or 0) + 1
 
 
 @callback(
@@ -178,7 +216,13 @@ def update_event_selectors(bridge_id):
         return [], []
     
     events = TestEvent.list_by_bridge(bridge_id)
-    options = [{"label": f"{e.name} ({e.metadata.collection_time.strftime('%Y-%m-%d %H:%M')})", "value": e.id} for e in events]
+    options = []
+    for e in events:
+        try:
+            time_str = e.metadata.collection_time.strftime('%Y-%m-%d %H:%M') if e.metadata and hasattr(e.metadata, 'collection_time') else e.id
+        except:
+            time_str = e.id
+        options.append({"label": f"{e.name} ({time_str})", "value": e.id})
     
     return options, options
 

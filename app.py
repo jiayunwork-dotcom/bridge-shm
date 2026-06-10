@@ -43,9 +43,12 @@ sidebar = dbc.Nav(
 app.layout = dbc.Container(
     [
         dcc.Location(id="url", refresh=False),
-        dcc.Store(id="current-bridge-store", storage_type="session"),
+        dcc.Store(id="current-bridge-store", storage_type="session", data=None),
         dcc.Store(id="current-event-store", storage_type="session"),
         dcc.Store(id="baseline-store", storage_type="session"),
+        dcc.Store(id="bridge-selector-trigger", storage_type="memory", data=0),
+        dcc.Store(id="home-refresh-trigger", storage_type="memory", data=0),
+        dcc.Store(id="config-refresh-trigger", storage_type="memory", data=0),
         dbc.Row(
             [
                 dbc.Col(
@@ -82,27 +85,29 @@ app.layout = dbc.Container(
 
 @callback(
     Output("global-bridge-selector", "options"),
-    Input("global-bridge-selector", "value"),
     Input("url", "pathname"),
+    Input("bridge-selector-trigger", "data"),
 )
-def update_global_bridge_selector(_, pathname):
+def update_global_bridge_selector(pathname, trigger):
     return get_bridge_options()
 
 
 @callback(
     Output("current-bridge-store", "data"),
     Output("global-notifications", "children"),
+    Output("bridge-selector-trigger", "data"),
     Input("global-bridge-selector", "value"),
     State("current-bridge-store", "data"),
-    prevent_initial_call=False,
+    State("bridge-selector-trigger", "data"),
+    prevent_initial_call=True,
 )
-def on_global_bridge_change(bridge_id, current_store):
+def on_global_bridge_change(bridge_id, current_store, trigger):
     if bridge_id is None:
-        return current_store, None
+        return current_store, None, trigger
     
     bridge = Bridge.load(bridge_id)
     if bridge is None:
-        return current_store, dbc.Alert("桥梁不存在", color="danger", duration=3000)
+        return current_store, dbc.Alert("桥梁不存在", color="danger", duration=3000), trigger
     
     store_data = {
         "id": bridge.id,
@@ -116,11 +121,22 @@ def on_global_bridge_change(bridge_id, current_store):
         duration=2000
     )
     
-    return store_data, msg
+    return store_data, msg, (trigger or 0) + 1
 
 
-
+@callback(
+    Output("global-bridge-selector", "value"),
+    Input("current-bridge-store", "modifications"),
+    State("current-bridge-store", "data"),
+    State("global-bridge-selector", "value"),
+    prevent_initial_call=True,
+)
+def sync_bridge_selector(modifications, store_data, current_value):
+    if store_data and store_data.get("id"):
+        if store_data["id"] != current_value:
+            return store_data["id"]
+    return dash.no_update
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=8050)
+    app.run_server(debug=True, host='0.0.0.0', port=8050)
