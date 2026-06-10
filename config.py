@@ -1,0 +1,26 @@
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+BRIDGES_DIR = os.path.join(DATA_DIR, 'bridges')
+TEST_EVENTS_DIR = os.path.join(DATA_DIR, 'test_events')
+
+os.makedirs(BRIDGES_DIR, exist_ok=True)
+os.makedirs(TEST_EVENTS_DIR, exist_ok=True)
+
+MAX_FILE_SIZE = 200 * 1024 * 1024
+
+DEFAULT_FFT_OVERLAP = 0.5
+DEFAULT_SINGULAR_VALUES_COUNT = 3
+DEFAULT_PEAK_HEIGHT_RATIO = 0.1
+DEFAULT_PEAK_DISTANCE_RATIO = 3.0
+DEFAULT_MAC_THRESHOLD = 0.8
+DEFAULT_EFDD_MIN_POINTS = 10
+DEFAULT_DAMPING_R2_THRESHOLD = 0.9
+DEFAULT_FLEXIBILITY_MODES = 5
+DEFAULT_TEMP_MODEL_MIN_POINTS = 20
+DEFAULT_CUSUM_K = 0.5
+DEFAULT_CUSUM_H = 5.0
+DEFAULT_CONTROL_CHART_SIGMA = 3.0
+
+WINDOW_FUNCTIONS = ['hann', 'hamming', 'blackman', 'rectangular']
