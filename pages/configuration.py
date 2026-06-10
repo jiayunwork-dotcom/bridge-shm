@@ -205,11 +205,10 @@ layout = dbc.Container([
 
 @callback(
     Output("config-bridge-selector", "options"),
-    Input("bridge-selector-trigger", "data"),
-    Input("home-refresh-trigger", "data"),
-    Input("config-refresh-trigger", "data"),
+    Input("bridge-list-refresh", "data"),
+    Input("current-bridge-store", "data"),
 )
-def update_config_bridge_selector(_1, _2, _3):
+def update_config_bridge_selector(_, store_data):
     bridges = Bridge.list_all()
     return [{"label": b.name, "value": b.id} for b in bridges]
 
@@ -217,40 +216,11 @@ def update_config_bridge_selector(_1, _2, _3):
 @callback(
     Output("config-bridge-selector", "value"),
     Input("current-bridge-store", "data"),
-    State("config-bridge-selector", "value"),
 )
-def sync_config_bridge_selector(store_data, current_value):
+def sync_config_bridge_selector(store_data):
     if store_data and store_data.get("id"):
-        if store_data["id"] != current_value:
-            return store_data["id"]
+        return store_data["id"]
     return dash.no_update
-
-
-@callback(
-    Output("current-bridge-store", "data", allow_duplicate=True),
-    Output("bridge-selector-trigger", "data", allow_duplicate=True),
-    Output("home-refresh-trigger", "data", allow_duplicate=True),
-    Input("config-bridge-selector", "value"),
-    State("current-bridge-store", "data"),
-    State("bridge-selector-trigger", "data"),
-    State("home-refresh-trigger", "data"),
-    prevent_initial_call=True,
-)
-def on_config_bridge_change(bridge_id, current_store, bridge_trigger, home_trigger):
-    if not bridge_id:
-        return current_store, bridge_trigger, home_trigger
-    
-    bridge = Bridge.load(bridge_id)
-    if bridge is None:
-        return current_store, bridge_trigger, home_trigger
-    
-    store_data = {
-        "id": bridge.id,
-        "name": bridge.name,
-        "baseline_event_id": bridge.baseline_event_id
-    }
-    
-    return store_data, (bridge_trigger or 0) + 1, (home_trigger or 0) + 1
 
 
 @callback(
@@ -258,7 +228,7 @@ def on_config_bridge_change(bridge_id, current_store, bridge_trigger, home_trigg
     Output("sensor-list", "children"),
     Output("alert-rule-list", "children"),
     Input("config-bridge-selector", "value"),
-    Input("config-refresh-trigger", "data"),
+    Input("current-bridge-store", "data"),
 )
 def update_bridge_config(bridge_id, _):
     if not bridge_id:
@@ -366,8 +336,7 @@ def update_bridge_config(bridge_id, _):
 
 @callback(
     Output("config-notifications", "children"),
-    Output("config-refresh-trigger", "data"),
-    Output("home-refresh-trigger", "data", allow_duplicate=True),
+    Output("bridge-list-refresh", "data", allow_duplicate=True),
     Input("add-sensor-btn", "n_clicks"),
     State("config-bridge-selector", "value"),
     State("sensor-id", "value"),
@@ -381,22 +350,21 @@ def update_bridge_config(bridge_id, _):
     State("sensor-dir-y", "value"),
     State("sensor-dir-z", "value"),
     State("sensor-sr", "value"),
-    State("config-refresh-trigger", "data"),
-    State("home-refresh-trigger", "data"),
+    State("bridge-list-refresh", "data"),
     prevent_initial_call=True,
 )
 def add_sensor(n_clicks, bridge_id, sensor_id, sensor_name, sensor_type, channel,
-              x, y, z, dx, dy, dz, sr, config_trigger, home_trigger):
+              x, y, z, dx, dy, dz, sr, refresh):
     if not bridge_id or not sensor_id or not sensor_name:
-        return dbc.Alert("请填写完整的测点信息", color="warning"), config_trigger, home_trigger
+        return dbc.Alert("请填写完整的测点信息", color="warning"), dash.no_update
     
     bridge = Bridge.load(bridge_id)
     if bridge is None:
-        return dbc.Alert("桥梁不存在", color="danger"), config_trigger, home_trigger
+        return dbc.Alert("桥梁不存在", color="danger"), dash.no_update
     
     for s in bridge.sensors:
         if s.id == sensor_id or (s.channel == channel and channel is not None):
-            return dbc.Alert("测点ID或通道号已存在", color="danger"), config_trigger, home_trigger
+            return dbc.Alert("测点ID或通道号已存在", color="danger"), dash.no_update
     
     sensor = Sensor(
         id=sensor_id,
@@ -412,66 +380,68 @@ def add_sensor(n_clicks, bridge_id, sensor_id, sensor_name, sensor_type, channel
     bridge.save()
     
     msg = dbc.Alert(f"测点 {sensor_name} 添加成功", color="success", duration=3000)
-    return msg, (config_trigger or 0) + 1, (home_trigger or 0) + 1
+    return msg, (refresh or 0) + 1
 
 
 @callback(
     Output("config-notifications", "children", allow_duplicate=True),
-    Output("config-refresh-trigger", "data", allow_duplicate=True),
-    Output("home-refresh-trigger", "data", allow_duplicate=True),
+    Output("bridge-list-refresh", "data", allow_duplicate=True),
     Input({"type": "delete-sensor", "index": dash.ALL}, "n_clicks"),
     State("config-bridge-selector", "value"),
-    State("config-refresh-trigger", "data"),
-    State("home-refresh-trigger", "data"),
+    State("bridge-list-refresh", "data"),
     prevent_initial_call=True,
 )
-def delete_sensor(n_clicks, bridge_id, config_trigger, home_trigger):
+def delete_sensor(n_clicks, bridge_id, refresh):
     ctx = dash.callback_context
     if not ctx.triggered or not bridge_id:
-        return dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update
     
     trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    import json
     sensor_id = json.loads(trigger_id)["index"]
     
     bridge = Bridge.load(bridge_id)
     if bridge is None:
-        return dbc.Alert("桥梁不存在", color="danger"), config_trigger, home_trigger
+        return dbc.Alert("桥梁不存在", color="danger"), dash.no_update
     
     bridge.sensors = [s for s in bridge.sensors if s.id != sensor_id]
     bridge.save()
     
     msg = dbc.Alert(f"测点 {sensor_id} 已删除", color="success", duration=3000)
-    return msg, (config_trigger or 0) + 1, (home_trigger or 0) + 1
+    return msg, (refresh or 0) + 1
 
 
 @callback(
     Output("config-notifications", "children", allow_duplicate=True),
-    Output("home-refresh-trigger", "data", allow_duplicate=True),
+    Output("current-bridge-store", "data", allow_duplicate=True),
     Input("set-baseline-btn", "n_clicks"),
     State("config-bridge-selector", "value"),
     State("baseline-event-selector", "value"),
-    State("home-refresh-trigger", "data"),
     prevent_initial_call=True,
 )
-def set_baseline(n_clicks, bridge_id, event_id, home_trigger):
+def set_baseline(n_clicks, bridge_id, event_id):
     if not bridge_id or not event_id:
-        return dbc.Alert("请选择桥梁和基准事件", color="warning"), home_trigger
+        return dbc.Alert("请选择桥梁和基准事件", color="warning"), dash.no_update
     
     bridge = Bridge.load(bridge_id)
     if bridge is None:
-        return dbc.Alert("桥梁不存在", color="danger"), home_trigger
+        return dbc.Alert("桥梁不存在", color="danger"), dash.no_update
     
     bridge.baseline_event_id = event_id
     bridge.save()
     
+    store_data = {
+        "id": bridge.id,
+        "name": bridge.name,
+        "baseline_event_id": bridge.baseline_event_id
+    }
+    
     msg = dbc.Alert("基准测试设置成功", color="success", duration=3000)
-    return msg, (home_trigger or 0) + 1
+    return msg, store_data
 
 
 @callback(
     Output("config-notifications", "children", allow_duplicate=True),
-    Output("config-refresh-trigger", "data", allow_duplicate=True),
+    Output("bridge-list-refresh", "data", allow_duplicate=True),
     Input("add-alert-rule-btn", "n_clicks"),
     State("config-bridge-selector", "value"),
     State("alert-rule-name", "value"),
@@ -480,12 +450,12 @@ def set_baseline(n_clicks, bridge_id, event_id, home_trigger):
     State("alert-threshold", "value"),
     State("alert-level", "value"),
     State("alert-suggestion", "value"),
-    State("config-refresh-trigger", "data"),
+    State("bridge-list-refresh", "data"),
     prevent_initial_call=True,
 )
-def add_alert_rule(n_clicks, bridge_id, name, condition, mode_idx, threshold, level, suggestion, config_trigger):
+def add_alert_rule(n_clicks, bridge_id, name, condition, mode_idx, threshold, level, suggestion, refresh):
     if not bridge_id or not name:
-        return dbc.Alert("请填写完整信息", color="warning"), config_trigger
+        return dbc.Alert("请填写完整信息", color="warning"), dash.no_update
     
     rules = load_alert_rules(bridge_id)
     
@@ -504,24 +474,23 @@ def add_alert_rule(n_clicks, bridge_id, name, condition, mode_idx, threshold, le
     save_alert_rules(bridge_id, rules)
     
     msg = dbc.Alert(f"预警规则 '{name}' 添加成功", color="success", duration=3000)
-    return msg, (config_trigger or 0) + 1
+    return msg, (refresh or 0) + 1
 
 
 @callback(
     Output("config-notifications", "children", allow_duplicate=True),
-    Output("config-refresh-trigger", "data", allow_duplicate=True),
+    Output("bridge-list-refresh", "data", allow_duplicate=True),
     Input({"type": "delete-rule", "index": dash.ALL}, "n_clicks"),
     State("config-bridge-selector", "value"),
-    State("config-refresh-trigger", "data"),
+    State("bridge-list-refresh", "data"),
     prevent_initial_call=True,
 )
-def delete_alert_rule(n_clicks, bridge_id, config_trigger):
+def delete_alert_rule(n_clicks, bridge_id, refresh):
     ctx = dash.callback_context
     if not ctx.triggered or not bridge_id:
         return dash.no_update, dash.no_update
     
     trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    import json
     rule_id = json.loads(trigger_id)["index"]
     
     rules = load_alert_rules(bridge_id)
@@ -529,4 +498,4 @@ def delete_alert_rule(n_clicks, bridge_id, config_trigger):
     save_alert_rules(bridge_id, rules)
     
     msg = dbc.Alert("预警规则已删除", color="success", duration=3000)
-    return msg, (config_trigger or 0) + 1
+    return msg, (refresh or 0) + 1

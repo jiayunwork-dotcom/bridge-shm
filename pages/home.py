@@ -1,8 +1,6 @@
 import dash
-from dash import html, dcc, Input, Output, callback, State
+from dash import html, dcc, Input, Output, callback, State, ctx
 import dash_bootstrap_components as dbc
-import plotly.graph_objects as go
-from datetime import datetime
 import sys
 import os
 
@@ -80,76 +78,41 @@ layout = dbc.Container([
 @callback(
     Output("bridge-stats", "children"),
     Output("home-bridge-selector", "options"),
-    Input("home-refresh-trigger", "data"),
+    Input("bridge-list-refresh", "data"),
     Input("current-bridge-store", "data"),
-    State("home-bridge-selector", "options"),
 )
-def update_bridge_stats(_, store_data, current_options):
+def update_bridge_stats(_, store_data):
     bridges = Bridge.list_all()
     n_bridges = len(bridges)
-    
     options = [{"label": b.name, "value": b.id} for b in bridges]
-    
-    stats = html.Div([
-        html.H4(f"桥梁总数: {n_bridges}"),
-    ])
-    
+    stats = html.Div([html.H4(f"桥梁总数: {n_bridges}")])
     return stats, options
 
 
 @callback(
     Output("home-bridge-selector", "value"),
     Input("current-bridge-store", "data"),
-    State("home-bridge-selector", "value"),
 )
-def sync_home_bridge_selector(store_data, current_value):
+def sync_home_bridge_selector(store_data):
     if store_data and store_data.get("id"):
-        if store_data["id"] != current_value:
-            return store_data["id"]
+        return store_data["id"]
     return dash.no_update
 
 
 @callback(
-    Output("current-bridge-store", "data"),
-    Output("home-refresh-trigger", "data"),
-    Output("bridge-selector-trigger", "data", allow_duplicate=True),
-    Input("home-bridge-selector", "value"),
-    State("current-bridge-store", "data"),
-    State("home-refresh-trigger", "data"),
-    State("bridge-selector-trigger", "data"),
-    prevent_initial_call=True,
-)
-def on_home_bridge_change(bridge_id, current_store, home_trigger, global_trigger):
-    if bridge_id is None:
-        return current_store, home_trigger, global_trigger
-    
-    bridge = Bridge.load(bridge_id)
-    if bridge is None:
-        return current_store, home_trigger, global_trigger
-    
-    store_data = {
-        "id": bridge.id,
-        "name": bridge.name,
-        "baseline_event_id": bridge.baseline_event_id
-    }
-    
-    return store_data, (home_trigger or 0) + 1, (global_trigger or 0) + 1
-
-
-@callback(
     Output("current-bridge-info", "children"),
-    Input("home-bridge-selector", "value"),
+    Input("current-bridge-store", "data"),
 )
-def update_current_bridge_info(selected_bridge_id):
-    if selected_bridge_id is None:
+def update_current_bridge_info(store_data):
+    if not store_data or not store_data.get("id"):
         return html.P("请先选择一座桥梁", className="text-muted")
     
-    bridge = Bridge.load(selected_bridge_id)
+    bridge = Bridge.load(store_data["id"])
     if bridge is None:
         return html.P("桥梁不存在", className="text-danger")
     
-    events = TestEvent.list_by_bridge(selected_bridge_id)
-    alerts = Alert.load_by_bridge(selected_bridge_id, unacknowledged_only=True)
+    events = TestEvent.list_by_bridge(store_data["id"])
+    alerts = Alert.load_by_bridge(store_data["id"], unacknowledged_only=True)
     
     n_sensors = len(bridge.sensors)
     n_events = len(events)
@@ -218,13 +181,13 @@ def update_current_bridge_info(selected_bridge_id):
 
 @callback(
     Output("recent-alerts", "children"),
-    Input("home-bridge-selector", "value"),
+    Input("current-bridge-store", "data"),
 )
-def update_recent_alerts(selected_bridge_id):
-    if selected_bridge_id is None:
+def update_recent_alerts(store_data):
+    if not store_data or not store_data.get("id"):
         return html.P("请先选择桥梁", className="text-muted")
     
-    alerts = Alert.load_by_bridge(selected_bridge_id)
+    alerts = Alert.load_by_bridge(store_data["id"])
     
     if not alerts:
         return html.P("暂无预警记录", className="text-muted")
@@ -279,41 +242,34 @@ def update_recent_alerts(selected_bridge_id):
     prevent_initial_call=True,
 )
 def toggle_create_bridge_modal(n_open, n_close, n_confirm, is_open):
-    ctx = dash.callback_context
     if not ctx.triggered:
         return is_open
-    
     trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
-    
     if trigger_id == "open-create-bridge-modal":
         return True
     elif trigger_id in ["close-create-bridge-modal", "confirm-create-bridge"]:
         return False
-    
     return is_open
 
 
 @callback(
     Output("home-notifications", "children"),
-    Output("home-refresh-trigger", "data", allow_duplicate=True),
-    Output("bridge-selector-trigger", "data", allow_duplicate=True),
+    Output("bridge-list-refresh", "data", allow_duplicate=True),
     Output("current-bridge-store", "data", allow_duplicate=True),
     Input("confirm-create-bridge", "n_clicks"),
     State("new-bridge-id", "value"),
     State("new-bridge-name", "value"),
     State("new-bridge-desc", "value"),
-    State("home-refresh-trigger", "data"),
-    State("bridge-selector-trigger", "data"),
-    State("current-bridge-store", "data"),
+    State("bridge-list-refresh", "data"),
     prevent_initial_call=True,
 )
-def create_bridge(n_clicks, bridge_id, bridge_name, bridge_desc, home_trigger, global_trigger, current_store):
+def create_bridge(n_clicks, bridge_id, bridge_name, bridge_desc, refresh):
     if not bridge_id or not bridge_name:
-        return dbc.Alert("请填写桥梁ID和名称", color="danger"), home_trigger, global_trigger, current_store
+        return dbc.Alert("请填写桥梁ID和名称", color="danger"), dash.no_update, dash.no_update
     
     existing = Bridge.load(bridge_id)
     if existing is not None:
-        return dbc.Alert("桥梁ID已存在", color="danger"), home_trigger, global_trigger, current_store
+        return dbc.Alert("桥梁ID已存在", color="danger"), dash.no_update, dash.no_update
     
     bridge = Bridge(
         id=bridge_id,
@@ -331,4 +287,4 @@ def create_bridge(n_clicks, bridge_id, bridge_name, bridge_desc, home_trigger, g
     
     msg = dbc.Alert(f"桥梁 {bridge_name} 创建成功！已自动切换到该桥梁", color="success", duration=4000)
     
-    return msg, (home_trigger or 0) + 1, (global_trigger or 0) + 1, store_data
+    return msg, (refresh or 0) + 1, store_data
