@@ -84,7 +84,7 @@ layout = dbc.Container([
 def update_bridge_stats(_, store_data):
     bridges = Bridge.list_all()
     n_bridges = len(bridges)
-    options = [{"label": b.name, "value": b.id} for b in bridges]
+    options = [{"label": f"{b.name} ({b.id})", "value": b.id} for b in bridges]
     stats = html.Div([html.H4(f"桥梁总数: {n_bridges}")])
     return stats, options
 

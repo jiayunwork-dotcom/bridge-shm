@@ -104,7 +104,7 @@ layout = dbc.Container([
 )
 def update_bridge_selector(_, store_data):
     bridges = Bridge.list_all()
-    return [{"label": b.name, "value": b.id} for b in bridges]
+    return [{"label": f"{b.name} ({b.id})", "value": b.id} for b in bridges]
 
 
 @callback(

@@ -368,7 +368,7 @@ layout = dbc.Container([
 )
 def update_import_bridge_selector(pathname, refresh, store_data):
     bridges = Bridge.list_all()
-    options = [{"label": b.name, "value": b.id} for b in bridges]
+    options = [{"label": f"{b.name} ({b.id})", "value": b.id} for b in bridges]
     
     bridge_id = None
     if store_data and store_data.get("id"):

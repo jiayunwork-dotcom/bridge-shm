@@ -116,11 +116,21 @@ layout = dbc.Container([
                                     ),
                                 ], width=6, className="mb-2"),
                             ]),
-                            dbc.Row(id="threshold-inputs-row", children=[
+                            dbc.Row([
                                 dbc.Col([
                                     html.Label("阈值*"),
                                     dbc.Input(id="rule-threshold", type="number", step=0.001, value=1.0),
-                                ], width=12, className="mb-2"),
+                                ], width=12, className="mb-2", id="single-threshold-col"),
+                            ]),
+                            dbc.Row([
+                                dbc.Col([
+                                    html.Label("最小值(下限)*"),
+                                    dbc.Input(id="rule-threshold-min", type="number", step=0.001, value=-1.0),
+                                ], width=6, className="mb-2", id="min-threshold-col", style={"display": "none"}),
+                                dbc.Col([
+                                    html.Label("最大值(上限)*"),
+                                    dbc.Input(id="rule-threshold-max", type="number", step=0.001, value=1.0),
+                                ], width=6, className="mb-2", id="max-threshold-col", style={"display": "none"}),
                             ]),
                             dbc.Row([
                                 dbc.Col([
@@ -295,17 +305,23 @@ layout = dbc.Container([
 )
 def update_bridge_selector(_, store_data):
     bridges = Bridge.list_all()
-    return [{"label": b.name, "value": b.id} for b in bridges]
+    return [{"label": f"{b.name} ({b.id})", "value": b.id} for b in bridges]
 
 
 @callback(
     Output("alert-mgmt-bridge-selector", "value"),
     Input("current-bridge-store", "data"),
+    Input("alert-mgmt-bridge-selector", "options"),
+    State("alert-mgmt-bridge-selector", "value"),
 )
-def sync_bridge_selector(store_data):
+def sync_bridge_selector(store_data, options, current_value):
     if store_data and store_data.get("id"):
-        return store_data["id"]
-    return no_update
+        target_id = store_data["id"]
+        if current_value != target_id:
+            valid_ids = [o["value"] for o in options] if options else []
+            if target_id in valid_ids:
+                return target_id
+    return current_value if current_value is not None else None
 
 
 @callback(
@@ -338,34 +354,16 @@ def load_sensor_and_event_options(bridge_id):
 
 
 @callback(
-    Output("threshold-inputs-row", "children"),
+    Output("single-threshold-col", "style"),
+    Output("min-threshold-col", "style"),
+    Output("max-threshold-col", "style"),
     Input("rule-comparison", "value"),
-    State("rule-threshold", "value"),
-    State("rule-threshold-min", "value") if False else State("rule-threshold", "value"),
-    State("rule-threshold-max", "value") if False else State("rule-threshold", "value"),
 )
-def update_threshold_inputs(comparison, cur_val, min_val, max_val):
+def update_threshold_inputs(comparison):
     if comparison == "out_of_range":
-        return [
-            dbc.Col([
-                html.Label("最小值(下限)*"),
-                dbc.Input(id="rule-threshold-min", type="number", step=0.001,
-                          value=min_val if min_val is not None else -1.0),
-            ], width=6, className="mb-2"),
-            dbc.Col([
-                html.Label("最大值(上限)*"),
-                dbc.Input(id="rule-threshold-max", type="number", step=0.001,
-                          value=max_val if max_val is not None else 1.0),
-            ], width=6, className="mb-2"),
-        ]
+        return {"display": "none"}, {}, {}
     else:
-        return [
-            dbc.Col([
-                html.Label("阈值*"),
-                dbc.Input(id="rule-threshold", type="number", step=0.001,
-                          value=cur_val if cur_val is not None else 1.0),
-            ], width=12, className="mb-2"),
-        ]
+        return {}, {"display": "none"}, {"display": "none"}
 
 
 @callback(
