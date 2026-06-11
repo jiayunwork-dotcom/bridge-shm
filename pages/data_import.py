@@ -1,5 +1,5 @@
 import dash
-from dash import html, dcc, Input, Output, callback, State, dash_table, ctx, ALL, MATCH
+from dash import html, dcc, Input, Output, callback, State, ctx, ALL
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -98,20 +98,16 @@ RESAMPLE_OPTIONS = [
 layout = dbc.Container([
     html.H2("数据导入与预处理", className="mb-4"),
     
-    dcc.Store(id="batch-processing-store", data={
-        "is_processing": False,
-        "current_index": 0,
-        "total_files": 0,
-        "results": [],
-        "queued_files": []
-    }),
-    
+    dcc.Store(id="batch-queue-store", data={"files": [], "index": 0, "results": [], "bridge_id": None, "custom_sr": None}),
+    dcc.Store(id="batch-processing-flag", data=False),
     dcc.Store(id="preview-data-store", data=None),
     dcc.Store(id="preview-clip-store", data=None),
     dcc.Store(id="show-all-channels-store", data=False),
     dcc.Store(id="event-list-refresh", data=0),
     dcc.Store(id="unarchived-list-refresh", data=0),
     dcc.Store(id="expanded-event-store", data=None),
+    
+    dcc.Interval(id="batch-process-interval", interval=300, disabled=True, n_intervals=0),
     
     dbc.Row([
         dbc.Col([
@@ -365,22 +361,23 @@ layout = dbc.Container([
 
 @callback(
     Output("import-bridge-selector", "options"),
-    Input("bridge-list-refresh", "data"),
-    Input("current-bridge-store", "data"),
-)
-def update_bridge_selector(_, store_data):
-    bridges = Bridge.list_all()
-    return [{"label": b.name, "value": b.id} for b in bridges]
-
-
-@callback(
     Output("import-bridge-selector", "value"),
-    Input("current-bridge-store", "data"),
+    Input("url", "pathname"),
+    Input("bridge-list-refresh", "data"),
+    State("current-bridge-store", "data"),
 )
-def sync_import_bridge_selector(store_data):
+def update_import_bridge_selector(pathname, refresh, store_data):
+    bridges = Bridge.list_all()
+    options = [{"label": b.name, "value": b.id} for b in bridges]
+    
+    bridge_id = None
     if store_data and store_data.get("id"):
-        return store_data["id"]
-    return dash.no_update
+        bridge_id = store_data["id"]
+        valid_ids = [o["value"] for o in options]
+        if bridge_id not in valid_ids:
+            bridge_id = None
+    
+    return options, bridge_id
 
 
 @callback(
@@ -536,194 +533,206 @@ def delete_preset(n_clicks, preset_id, bridge_id, store_data):
 
 
 @callback(
-    Output("batch-processing-store", "data"),
+    Output("batch-queue-store", "data"),
+    Output("batch-process-interval", "disabled"),
     Output("batch-progress-container", "style"),
     Output("batch-results-list", "children"),
-    Output("batch-progress-bar", "value"),
-    Output("batch-progress-text", "children"),
-    Output("preview-data-store", "data", allow_duplicate=True),
-    Output("import-notifications", "children", allow_duplicate=True),
     Input("upload-multiple-data", "filename"),
     Input("upload-multiple-data", "contents"),
-    Input("batch-processing-store", "data"),
     State("import-bridge-selector", "value"),
     State("current-bridge-store", "data"),
     State("import-sampling-rate", "value"),
-    State("batch-processing-store", "data"),
+    State("batch-queue-store", "data"),
+    prevent_initial_call=True,
+)
+def start_batch_upload(filenames, contents, bridge_id, store_data, custom_sr, current_queue):
+    if not filenames or not contents:
+        return dash.no_update, True, {"display": "none"}, []
+    
+    bid = bridge_id or (store_data.get("id") if store_data else None)
+    if not bid:
+        return current_queue, True, {"display": "none"}, [
+            html.Div([
+                html.Span("请先选择桥梁再上传文件", className="text-danger fw-bold")
+            ])
+        ]
+    
+    sorted_filenames = sort_files_by_timestamp(filenames)
+    sorted_contents = [contents[filenames.index(f)] for f in sorted_filenames]
+    
+    file_data = []
+    for fname, content in zip(sorted_filenames, sorted_contents):
+        file_data.append({
+            "filename": fname,
+            "content": content,
+            "status": "pending",
+            "error": None,
+            "channels": None,
+            "sampling_rate": None,
+            "n_samples": None,
+            "file_id": None
+        })
+    
+    queue_data = {
+        "files": file_data,
+        "index": 0,
+        "results": [],
+        "bridge_id": bid,
+        "custom_sr": custom_sr
+    }
+    
+    results_rows = []
+    for fd in file_data:
+        results_rows.append(html.Div([
+            html.Span(fd["filename"], className="me-2"),
+            html.Span("等待处理...", className="text-muted"),
+        ], className="mb-1"))
+    
+    return queue_data, False, {"display": "block"}, results_rows
+
+
+@callback(
+    Output("batch-queue-store", "data", allow_duplicate=True),
+    Output("batch-results-list", "children", allow_duplicate=True),
+    Output("batch-progress-bar", "value"),
+    Output("batch-progress-text", "children"),
+    Output("batch-process-interval", "disabled", allow_duplicate=True),
+    Output("preview-data-store", "data"),
+    Output("import-notifications", "children", allow_duplicate=True),
+    Input("batch-process-interval", "n_intervals"),
+    State("batch-queue-store", "data"),
     State("preview-data-store", "data"),
     prevent_initial_call=True,
 )
-def handle_batch_upload(filenames, contents, processing_state, bridge_id, store_data,
-                        custom_sr, current_state, current_preview):
-    triggered = ctx.triggered_id
+def process_next_file(n_intervals, queue_data, current_preview):
+    if not queue_data or not queue_data.get("files"):
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, True, dash.no_update, dash.no_update
     
-    if triggered == "upload-multiple-data" and filenames and contents:
-        if not bridge_id and not (store_data and store_data.get("id")):
-            return current_state, {"display": "none"}, [], 0, "", current_preview, \
-                   dbc.Alert("请先选择桥梁", color="danger", duration=3000)
-        
-        sorted_filenames = sort_files_by_timestamp(filenames)
-        sorted_contents = [contents[filenames.index(f)] for f in sorted_filenames]
-        
-        new_state = {
-            "is_processing": True,
-            "current_index": 0,
-            "total_files": len(sorted_filenames),
-            "results": [],
-            "queued_files": list(zip(sorted_filenames, sorted_contents)),
-            "bridge_id": bridge_id or store_data["id"],
-            "custom_sr": custom_sr
-        }
-        
-        results_rows = []
-        for fname in sorted_filenames:
-            results_rows.append(html.Div([
-                html.Span(fname, className="me-2"),
-                html.Span("等待处理...", className="text-muted"),
-            ], className="mb-1", id=f"result-row-{fname.replace('.', '_')}"))
-        
-        return new_state, {"display": "block"}, results_rows, 0, \
-               f"准备处理: 0 / {len(sorted_filenames)}", current_preview, None
+    files = queue_data["files"]
+    idx = queue_data["index"]
+    total = len(files)
+    bid = queue_data["bridge_id"]
+    cust_sr = queue_data.get("custom_sr")
     
-    if triggered == "batch-processing-store" and processing_state.get("is_processing"):
-        idx = processing_state["current_index"]
-        total = processing_state["total_files"]
-        queued = processing_state["queued_files"]
-        bid = processing_state["bridge_id"]
-        cust_sr = processing_state.get("custom_sr")
-        results = processing_state["results"].copy()
-        
-        if idx >= total:
-            final_state = {
-                **processing_state,
-                "is_processing": False
-            }
-            results_rows = []
-            for r in results:
-                color = "danger" if r.get("error") else "success"
-                status = "失败: " + r.get("error", "") if r.get("error") else "成功"
-                results_rows.append(html.Div([
-                    html.Span(r["filename"], className="me-2"),
-                    html.Span(f"通道: {r.get('channels', '-')} | "
-                              f"采样率: {r.get('sampling_rate', '-')} Hz | "
-                              f"点数: {r.get('n_samples', '-')} | "),
-                    html.Span(status, className=f"text-{color} fw-bold"),
-                ], className="mb-1"))
-            
-            return final_state, {"display": "block"}, results_rows, 100, \
-                   f"处理完成: {total} / {total}", current_preview, \
-                   dbc.Alert(f"批量处理完成，成功 {sum(1 for r in results if not r.get('error'))}/{total}",
-                             color="success", duration=5000)
-        
-        filename, content = queued[idx]
-        
-        try:
-            content_type, content_string = content.split(',')
-            decoded = base64.b64decode(content_string)
-            tmp_path = f"/tmp/{filename}"
-            with open(tmp_path, 'wb') as f:
-                f.write(decoded)
-            
-            valid, msg = check_file_size(tmp_path)
-            if not valid:
-                raise ValueError(msg)
-            
-            df, detected_sr, channel_names = import_csv(
-                tmp_path,
-                has_time_column=True,
-                custom_sampling_rate=cust_sr
-            )
-            
-            n_samples = len(df)
-            n_channels = detect_channels(df)
-            duration = n_samples / detected_sr
-            
-            file_id = str(uuid.uuid4())[:8]
-            uf = UnarchivedFile(
-                id=file_id,
-                bridge_id=bid,
-                filename=filename,
-                sampling_rate=detected_sr,
-                channel_names=channel_names,
-                n_samples=n_samples,
-                duration=duration,
-                upload_time=datetime.now()
-            )
-            uf.save_metadata()
-            uf.save_data(df)
-            
-            result = {
-                "filename": filename,
-                "success": True,
-                "channels": n_channels,
-                "sampling_rate": int(detected_sr),
-                "n_samples": n_samples,
-                "file_id": file_id
-            }
-            
-            preview_data = {
-                "file_id": file_id,
-                "filename": filename,
-                "bridge_id": bid,
-                "sampling_rate": detected_sr,
-                "channel_names": channel_names,
-                "data": df.to_dict(orient='records'),
-                "duration": duration,
-                "clip_range": None
-            }
-            
-        except Exception as e:
-            result = {
-                "filename": filename,
-                "success": False,
-                "error": str(e)[:50]
-            }
-            preview_data = current_preview
-        
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-        
-        results.append(result)
-        
+    if idx >= total:
         results_rows = []
-        for i, r in enumerate(results):
-            color = "danger" if r.get("error") else "success"
-            status = "失败: " + r.get("error", "") if r.get("error") else "成功"
+        for fd in files:
+            if fd["status"] == "error":
+                color = "danger"
+                status = f"失败: {fd.get('error', '')}"
+            else:
+                color = "success"
+                status = "成功"
             results_rows.append(html.Div([
-                html.Span(r["filename"], className="me-2"),
-                html.Span(f"通道: {r.get('channels', '-')} | "
-                          f"采样率: {r.get('sampling_rate', '-')} Hz | "
-                          f"点数: {r.get('n_samples', '-')} | "),
+                html.Span(fd["filename"], className="me-2"),
+                html.Span(f"通道: {fd.get('channels', '-')} | "
+                          f"采样率: {fd.get('sampling_rate', '-')} Hz | "
+                          f"点数: {fd.get('n_samples', '-')} | "),
                 html.Span(status, className=f"text-{color} fw-bold"),
             ], className="mb-1"))
         
-        for fname, _ in queued[len(results):]:
-            results_rows.append(html.Div([
-                html.Span(fname, className="me-2"),
-                html.Span("等待处理...", className="text-muted"),
-            ], className="mb-1"))
+        success_count = sum(1 for f in files if f["status"] == "success")
+        msg = dbc.Alert(f"批量处理完成，成功 {success_count}/{total}", color="success", duration=5000)
         
-        if idx + 1 < len(queued):
-            processing_row = html.Div([
-                html.Span(queued[idx + 1][0], className="me-2"),
-                html.Span("处理中...", className="text-primary fw-bold"),
-            ], className="mb-1")
-            if len(results_rows) > idx + 1:
-                results_rows[idx + 1] = processing_row
+        return queue_data, results_rows, 100, f"处理完成: {total} / {total}", True, current_preview, msg
+    
+    current_file = files[idx]
+    filename = current_file["filename"]
+    content = current_file["content"]
+    
+    preview_data = current_preview
+    
+    try:
+        content_type, content_string = content.split(',')
+        decoded = base64.b64decode(content_string)
+        tmp_path = f"/tmp/{filename}"
+        with open(tmp_path, 'wb') as f:
+            f.write(decoded)
         
-        new_state = {
-            **processing_state,
-            "current_index": idx + 1,
-            "results": results
+        valid, msg = check_file_size(tmp_path)
+        if not valid:
+            raise ValueError(msg)
+        
+        df, detected_sr, channel_names = import_csv(
+            tmp_path,
+            has_time_column=True,
+            custom_sampling_rate=cust_sr
+        )
+        
+        n_samples = len(df)
+        n_channels = detect_channels(df)
+        duration = n_samples / detected_sr
+        
+        file_id = str(uuid.uuid4())[:8]
+        uf = UnarchivedFile(
+            id=file_id,
+            bridge_id=bid,
+            filename=filename,
+            sampling_rate=detected_sr,
+            channel_names=channel_names,
+            n_samples=n_samples,
+            duration=duration,
+            upload_time=datetime.now()
+        )
+        uf.save_metadata()
+        uf.save_data(df)
+        
+        files[idx]["status"] = "success"
+        files[idx]["channels"] = n_channels
+        files[idx]["sampling_rate"] = int(detected_sr)
+        files[idx]["n_samples"] = n_samples
+        files[idx]["file_id"] = file_id
+        
+        preview_data = {
+            "file_id": file_id,
+            "filename": filename,
+            "bridge_id": bid,
+            "sampling_rate": detected_sr,
+            "channel_names": channel_names,
+            "data": df.to_dict(orient='records'),
+            "duration": duration,
+            "clip_range": None
         }
         
-        progress = ((idx + 1) / total) * 100
-        
-        return new_state, {"display": "block"}, results_rows, progress, \
-               f"处理中: {idx + 1} / {total}", preview_data, None
+    except Exception as e:
+        files[idx]["status"] = "error"
+        files[idx]["error"] = str(e)[:80]
     
-    return current_state, {"display": "none"}, [], 0, "", current_preview, None
+    finally:
+        if 'tmp_path' in dir() and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+    
+    queue_data["index"] = idx + 1
+    queue_data["files"] = files
+    
+    results_rows = []
+    for i, fd in enumerate(files):
+        if fd["status"] == "success":
+            color = "success"
+            status = "成功"
+            info = f"通道: {fd.get('channels', '-')} | 采样率: {fd.get('sampling_rate', '-')} Hz | 点数: {fd.get('n_samples', '-')} | "
+        elif fd["status"] == "error":
+            color = "danger"
+            status = f"失败: {fd.get('error', '')}"
+            info = ""
+        elif i == idx:
+            color = "primary"
+            status = "处理中..."
+            info = ""
+        else:
+            color = "muted"
+            status = "等待处理..."
+            info = ""
+        
+        results_rows.append(html.Div([
+            html.Span(fd["filename"], className="me-2"),
+            html.Span(info) if info else None,
+            html.Span(status, className=f"text-{color} fw-bold"),
+        ], className="mb-1"))
+    
+    progress = (idx / total) * 100
+    
+    return queue_data, results_rows, progress, f"处理中: {idx + 1} / {total}", False, preview_data, None
 
 
 @callback(
@@ -731,11 +740,11 @@ def handle_batch_upload(filenames, contents, processing_state, bridge_id, store_
     Output("preview-file-info", "children"),
     Output("toggle-channels-btn", "style"),
     Output("toggle-channels-btn", "children"),
+    Output("show-all-channels-store", "data", allow_duplicate=True),
     Input("preview-data-store", "data"),
     Input("apply-preprocess-btn", "n_clicks"),
     Input("preview-clip-store", "data"),
     Input("toggle-channels-btn", "n_clicks"),
-    Input("show-all-channels-store", "data"),
     State("detrend-method-select", "value"),
     State("poly-order-input", "value"),
     State("filter-type-select", "value"),
@@ -745,7 +754,7 @@ def handle_batch_upload(filenames, contents, processing_state, bridge_id, store_
     State("show-all-channels-store", "data"),
     prevent_initial_call=True,
 )
-def update_realtime_preview(preview_data, apply_n_clicks, clip_range, toggle_n, show_all,
+def update_realtime_preview(preview_data, apply_n_clicks, clip_range, toggle_n,
                             detrend_method, poly_order, filter_type, cutoff1, cutoff2, resample_val,
                             current_show_all):
     if not preview_data:
@@ -755,20 +764,25 @@ def update_realtime_preview(preview_data, apply_n_clicks, clip_range, toggle_n, 
             xaxis_title="时间 (s)",
             yaxis_title="幅值"
         )
-        return fig, html.P("无数据", className="text-muted"), {"display": "none"}, "展开全部通道"
+        return fig, html.P("无数据", className="text-muted"), {"display": "none"}, "展开全部通道", current_show_all
     
     df = pd.DataFrame(preview_data["data"])
     sampling_rate = preview_data["sampling_rate"]
     channel_names = preview_data["channel_names"]
     filename = preview_data["filename"]
+    show_all_val = current_show_all
+    
+    triggered = ctx.triggered_id
+    
+    if triggered == "toggle-channels-btn":
+        show_all_val = not current_show_all
     
     if clip_range and clip_range.get("start") is not None and clip_range.get("end") is not None:
         start_idx = int(clip_range["start"] * sampling_rate)
         end_idx = int(clip_range["end"] * sampling_rate)
         df = df.iloc[start_idx:end_idx].reset_index(drop=True)
     
-    triggered = ctx.triggered_id
-    if triggered in ["apply-preprocess-btn", "preview-clip-store"]:
+    if triggered == "apply-preprocess-btn":
         target_sr = None if resample_val == "original" else resample_val
         try:
             df, final_sr, _ = preprocess_pipeline(
@@ -784,11 +798,7 @@ def update_realtime_preview(preview_data, apply_n_clicks, clip_range, toggle_n, 
         except Exception as e:
             fig = go.Figure()
             fig.update_layout(title=f"预处理错误: {str(e)}")
-            return fig, html.P(str(e), className="text-danger"), {"display": "none"}, "展开全部通道"
-    
-    show_all_val = current_show_all
-    if triggered == "toggle-channels-btn":
-        show_all_val = not current_show_all
+            return fig, html.P(str(e), className="text-danger"), {"display": "none"}, "展开全部通道", current_show_all
     
     n_channels = len(channel_names)
     display_channels = channel_names if show_all_val or n_channels <= 8 else channel_names[:8]
@@ -846,17 +856,7 @@ def update_realtime_preview(preview_data, apply_n_clicks, clip_range, toggle_n, 
     btn_style = {"display": "inline-block"} if n_channels > 8 else {"display": "none"}
     btn_text = "收起通道" if show_all_val else "展开全部通道"
     
-    return fig, info, btn_style, btn_text
-
-
-@callback(
-    Output("show-all-channels-store", "data"),
-    Input("toggle-channels-btn", "n_clicks"),
-    State("show-all-channels-store", "data"),
-    prevent_initial_call=True,
-)
-def toggle_show_all(n_clicks, current):
-    return not current
+    return fig, info, btn_style, btn_text, show_all_val
 
 
 @callback(
@@ -877,26 +877,7 @@ def handle_clip_selection(selected_data, confirm_n, cancel_n, preview_data, curr
     if triggered == "cancel-clip-btn":
         return None, html.P("未选择裁剪区域", className="text-muted"), True, True
     
-    if triggered == "confirm-clip-btn" and preview_data and current_clip:
-        df = pd.DataFrame(preview_data["data"])
-        sr = preview_data["sampling_rate"]
-        start_idx = int(current_clip["start"] * sr)
-        end_idx = int(current_clip["end"] * sr)
-        clipped_df = df.iloc[start_idx:end_idx].reset_index(drop=True)
-        
-        file_id = preview_data["file_id"]
-        bridge_id = preview_data["bridge_id"]
-        uf = UnarchivedFile.load(bridge_id, file_id)
-        if uf:
-            uf.save_data(clipped_df)
-        
-        new_preview = {
-            **preview_data,
-            "data": clipped_df.to_dict(orient='records'),
-            "duration": len(clipped_df) / sr,
-            "clip_range": current_clip
-        }
-        
+    if triggered == "confirm-clip-btn":
         return None, html.P("裁剪已应用", className="text-success"), True, True
     
     if triggered == "realtime-preview-plot" and selected_data and preview_data:
@@ -935,6 +916,12 @@ def apply_clip_to_preview(n_clicks, preview_data, clip_range):
     start_idx = int(clip_range["start"] * sr)
     end_idx = int(clip_range["end"] * sr)
     clipped_df = df.iloc[start_idx:end_idx].reset_index(drop=True)
+    
+    file_id = preview_data["file_id"]
+    bridge_id = preview_data["bridge_id"]
+    uf = UnarchivedFile.load(bridge_id, file_id)
+    if uf:
+        uf.save_data(clipped_df)
     
     return {
         **preview_data,

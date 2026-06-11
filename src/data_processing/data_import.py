@@ -44,6 +44,10 @@ def import_csv(
     
     df = pd.read_csv(filepath, encoding=encoding)
     
+    sampling_rate = custom_sampling_rate
+    if sampling_rate is None and has_time_column:
+        sampling_rate = detect_sampling_rate(df)
+    
     if has_time_column and df.shape[1] > 0:
         first_col = df.columns[0]
         if first_col.lower() in ['time', 't', 'timestamp']:
@@ -52,11 +56,8 @@ def import_csv(
     channel_names = list(df.columns)
     n_channels = detect_channels(df)
     
-    sampling_rate = custom_sampling_rate
     if sampling_rate is None:
-        sampling_rate = detect_sampling_rate(df)
-        if sampling_rate is None:
-            raise ValueError("无法自动检测采样率，请手动指定采样频率")
+        raise ValueError("无法自动检测采样率，请手动指定采样频率")
     
     if sampling_rate < 100 or sampling_rate > 1000:
         raise ValueError(f"采样率{sampling_rate:.1f}Hz不在有效范围(100Hz-1000Hz)内")
