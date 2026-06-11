@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 from src.models.anomaly_alert import (
-    AlertRule, AnomalyAlertEvent,
+    AlertRule, AnomalyAlertEvent, RuleCondition, LogicOperator,
     MetricType, ComparisonType, PriorityLevel, AlertStatus,
     add_alert_event, load_alert_rules, update_alert_rule,
     generate_event_id
@@ -22,6 +22,7 @@ class AnomalyDetector:
     def __init__(self, cooldown_minutes: int = DEFAULT_COOLDOWN_MINUTES):
         self.cooldown_minutes = cooldown_minutes
         self._duration_counters: Dict[str, Dict[int, float]] = defaultdict(lambda: defaultdict(float))
+        self._condition_counters: Dict[str, Dict[str, Dict[int, float]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
         self._last_trigger_time: Dict[str, datetime] = {}
 
     @staticmethod
@@ -145,6 +146,61 @@ class AnomalyDetector:
             return None, None, None, None
         return df[ch_name].values, uf.sampling_rate, uf.id, uf.duration
 
+    def _evaluate_single_condition(
+        self,
+        rule_id: str,
+        condition_id: str,
+        condition: RuleCondition,
+        bridge: Bridge,
+        eval_interval: int,
+        baseline_freq: Optional[float] = None,
+        baseline_value: Optional[float] = None
+    ) -> Dict[int, Dict]:
+        results: Dict[int, Dict] = {}
+
+        for channel in condition.sensor_channels:
+            data, sampling_rate, file_id, duration = self._get_latest_unarchived_data(bridge.id, channel)
+            if data is None or sampling_rate is None or len(data) < sampling_rate:
+                results[channel] = {"has_data": False}
+                continue
+
+            n_eval_samples = min(len(data), int(sampling_rate * eval_interval))
+            eval_data = data[-n_eval_samples:]
+
+            metric_value = self.compute_metric(
+                condition.metric_type, eval_data, sampling_rate, baseline_freq, baseline_value
+            )
+
+            triggered = self.check_threshold(
+                metric_value, condition.comparison, condition.threshold,
+                condition.threshold_min, condition.threshold_max
+            )
+
+            counter_key = f"{rule_id}_{condition_id}"
+
+            if triggered:
+                self._condition_counters[rule_id][condition_id][channel] += eval_interval
+                accumulated = self._condition_counters[rule_id][condition_id][channel]
+                duration_met = accumulated >= condition.duration_seconds
+            else:
+                self._condition_counters[rule_id][condition_id][channel] = 0.0
+                accumulated = 0.0
+                duration_met = False
+
+            results[channel] = {
+                "has_data": True,
+                "metric_value": metric_value,
+                "triggered": triggered,
+                "duration_met": duration_met,
+                "accumulated": accumulated,
+                "file_id": file_id,
+                "duration": duration,
+                "n_eval_samples": n_eval_samples,
+                "sampling_rate": sampling_rate
+            }
+
+        return results
+
     def evaluate_rule(
         self,
         rule: AlertRule,
@@ -158,6 +214,30 @@ class AnomalyDetector:
 
         if self.is_in_cooldown(rule.id):
             return new_events
+
+        if rule.is_composite and rule.conditions:
+            new_events = self._evaluate_composite_rule(rule, bridge, eval_interval)
+        else:
+            new_events = self._evaluate_simple_rule(rule, bridge, eval_interval)
+
+        if new_events:
+            rules = load_alert_rules(bridge.id)
+            for r in rules:
+                if r.id == rule.id:
+                    r.last_triggered = datetime.now()
+                    break
+            from src.models.anomaly_alert import save_alert_rules
+            save_alert_rules(bridge.id, rules)
+
+        return new_events
+
+    def _evaluate_simple_rule(
+        self,
+        rule: AlertRule,
+        bridge: Bridge,
+        eval_interval: int
+    ) -> List[AnomalyAlertEvent]:
+        new_events: List[AnomalyAlertEvent] = []
 
         baseline_freq = None
         baseline_value = None
@@ -187,8 +267,6 @@ class AnomalyDetector:
                 rule.threshold_min, rule.threshold_max
             )
 
-            counter_key = f"{rule.id}_{channel}"
-
             if triggered:
                 self._duration_counters[rule.id][channel] += eval_interval
                 accumulated = self._duration_counters[rule.id][channel]
@@ -215,14 +293,110 @@ class AnomalyDetector:
             else:
                 self._duration_counters[rule.id][channel] = 0.0
 
-        if new_events:
-            rules = load_alert_rules(bridge.id)
-            for r in rules:
-                if r.id == rule.id:
-                    r.last_triggered = datetime.now()
-                    break
-            from src.models.anomaly_alert import save_alert_rules
-            save_alert_rules(bridge.id, rules)
+        return new_events
+
+    def _evaluate_composite_rule(
+        self,
+        rule: AlertRule,
+        bridge: Bridge,
+        eval_interval: int
+    ) -> List[AnomalyAlertEvent]:
+        new_events: List[AnomalyAlertEvent] = []
+        is_and = rule.logic_operator == LogicOperator.AND
+
+        all_condition_results: Dict[str, Dict[int, Dict]] = {}
+        all_channels = set()
+
+        for condition in rule.conditions:
+            baseline_freq = None
+            baseline_value = None
+            if condition.metric_type in (MetricType.FREQUENCY_OFFSET, MetricType.BASELINE_DRIFT):
+                first_ch = condition.sensor_channels[0] if condition.sensor_channels else 1
+                data, sr, _, _ = self._get_latest_unarchived_data(bridge.id, first_ch)
+                if data is not None and len(data) > 0:
+                    if condition.metric_type == MetricType.FREQUENCY_OFFSET:
+                        baseline_freq = self.compute_dominant_frequency(data[:min(len(data), int(sr * 2))], sr)
+                    else:
+                        baseline_value = float(np.mean(data[:min(len(data), int(sr * 2))]))
+
+            results = self._evaluate_single_condition(
+                rule.id, condition.id, condition, bridge, eval_interval,
+                baseline_freq, baseline_value
+            )
+            all_condition_results[condition.id] = results
+            for ch in results.keys():
+                all_channels.add(ch)
+
+        for channel in all_channels:
+            skipped_conditions = []
+            triggered_conditions = []
+            duration_met_conditions = []
+            has_data_conditions = []
+            best_metric_value = 0.0
+            best_file_id = None
+            best_duration = 0.0
+            best_n_eval_samples = 0
+            best_sampling_rate = None
+
+            for cond_idx, condition in enumerate(rule.conditions):
+                cond_result = all_condition_results.get(condition.id, {})
+                ch_result = cond_result.get(channel)
+
+                if ch_result is None or not ch_result.get("has_data", False):
+                    skipped_conditions.append(condition.id)
+                    if is_and:
+                        continue
+                    else:
+                        continue
+
+                has_data_conditions.append(condition.id)
+                if best_file_id is None:
+                    best_file_id = ch_result.get("file_id")
+                    best_duration = ch_result.get("duration", 0.0) or 0.0
+                    best_n_eval_samples = ch_result.get("n_eval_samples", 0) or 0
+                    best_sampling_rate = ch_result.get("sampling_rate")
+                best_metric_value = max(best_metric_value, abs(ch_result.get("metric_value", 0.0)))
+
+                if ch_result.get("triggered", False):
+                    triggered_conditions.append(condition.id)
+                if ch_result.get("duration_met", False):
+                    duration_met_conditions.append(condition.id)
+
+            should_fire = False
+            if is_and:
+                valid_conditions = [c for c in rule.conditions if c.id in has_data_conditions]
+                if len(valid_conditions) > 0:
+                    all_duration_met = all(c.id in duration_met_conditions for c in valid_conditions)
+                    if all_duration_met:
+                        should_fire = True
+            else:
+                if any(c.id in duration_met_conditions for c in rule.conditions):
+                    should_fire = True
+
+            if should_fire:
+                offset = best_duration - (best_n_eval_samples / best_sampling_rate) if (best_duration and best_sampling_rate) else 0.0
+                event = AnomalyAlertEvent(
+                    id=generate_event_id(),
+                    bridge_id=bridge.id,
+                    rule_id=rule.id,
+                    rule_name=rule.name,
+                    trigger_time=datetime.now(),
+                    sensor_channel=channel,
+                    metric_value=round(best_metric_value, 6),
+                    metric_type=rule.metric_type,
+                    priority=rule.priority,
+                    status=AlertStatus.PENDING,
+                    unarchived_file_id=best_file_id,
+                    trigger_offset_seconds=max(0.0, offset),
+                    is_composite=True,
+                    skipped_condition_ids=skipped_conditions,
+                    triggered_condition_ids=triggered_conditions
+                )
+                new_events.append(event)
+                self._last_trigger_time[rule.id] = datetime.now()
+                for condition in rule.conditions:
+                    if condition.id in duration_met_conditions:
+                        self._condition_counters[rule.id][condition.id][channel] = 0.0
 
         return new_events
 
