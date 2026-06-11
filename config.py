@@ -4,9 +4,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 BRIDGES_DIR = os.path.join(DATA_DIR, 'bridges')
 TEST_EVENTS_DIR = os.path.join(DATA_DIR, 'test_events')
+PRESETS_DIR = os.path.join(DATA_DIR, 'presets')
+UNARCHIVED_DIR = os.path.join(DATA_DIR, 'unarchived')
 
 os.makedirs(BRIDGES_DIR, exist_ok=True)
 os.makedirs(TEST_EVENTS_DIR, exist_ok=True)
+os.makedirs(PRESETS_DIR, exist_ok=True)
+os.makedirs(UNARCHIVED_DIR, exist_ok=True)
 
 MAX_FILE_SIZE = 200 * 1024 * 1024
 
