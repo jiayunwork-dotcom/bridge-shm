@@ -98,11 +98,14 @@ class Bridge:
         if not os.path.exists(BRIDGES_DIR):
             return bridges
         for filename in os.listdir(BRIDGES_DIR):
-            if filename.endswith('.json'):
-                bridge_id = filename[:-5]
-                bridge = cls.load(bridge_id)
-                if bridge:
-                    bridges.append(bridge)
+            if not filename.endswith('.json'):
+                continue
+            if '_anomaly_' in filename:
+                continue
+            bridge_id = filename[:-5]
+            bridge = cls.load(bridge_id)
+            if bridge:
+                bridges.append(bridge)
         return bridges
 
     def get_sensor_by_channel(self, channel: int) -> Optional[Sensor]:

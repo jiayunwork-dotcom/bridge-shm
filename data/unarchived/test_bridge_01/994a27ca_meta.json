@@ -1,0 +1,21 @@
+{
+  "id": "994a27ca",
+  "bridge_id": "test_bridge_01",
+  "filename": "bridge_test_001_20260606_093640.csv",
+  "sampling_rate": 200.00000000000426,
+  "channel_names": [
+    "CH_01",
+    "CH_02",
+    "CH_03",
+    "CH_04",
+    "CH_05",
+    "CH_06",
+    "CH_07",
+    "CH_08"
+  ],
+  "n_samples": 1558,
+  "duration": 7.789999999999834,
+  "upload_time": "2026-06-11T11:16:03.759613",
+  "event_id": null,
+  "preprocessing_params": {}
+}

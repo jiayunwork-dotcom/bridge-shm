@@ -31,6 +31,7 @@ sidebar = dbc.Nav(
         dbc.NavLink("模态分析", href="/modal-analysis", active="exact"),
         dbc.NavLink("损伤检测", href="/damage-detection", active="exact"),
         dbc.NavLink("长期监控", href="/monitoring", active="exact"),
+        dbc.NavLink("告警管理", href="/alert-management", active="exact"),
         dbc.NavLink("系统配置", href="/configuration", active="exact"),
         dbc.NavLink("报告生成", href="/report", active="exact"),
     ],
@@ -139,6 +140,7 @@ def on_global_bridge_change(bridge_id, current_store, refresh):
     Input("modal-bridge-selector", "value"),
     Input("damage-bridge-selector", "value"),
     Input("monitoring-bridge-selector", "value"),
+    Input("alert-mgmt-bridge-selector", "value"),
     Input("report-bridge-selector", "value"),
     State("current-bridge-store", "data"),
     State("bridge-list-refresh", "data"),
@@ -146,7 +148,7 @@ def on_global_bridge_change(bridge_id, current_store, refresh):
 )
 def on_any_page_bridge_change(
     home_val, config_val, import_val, modal_val,
-    damage_val, monitoring_val, report_val,
+    damage_val, monitoring_val, alert_mgmt_val, report_val,
     current_store, refresh
 ):
     triggered_id = ctx.triggered_id
@@ -160,6 +162,7 @@ def on_any_page_bridge_change(
         "modal-bridge-selector": modal_val,
         "damage-bridge-selector": damage_val,
         "monitoring-bridge-selector": monitoring_val,
+        "alert-mgmt-bridge-selector": alert_mgmt_val,
         "report-bridge-selector": report_val,
     }
 
