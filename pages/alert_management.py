@@ -616,13 +616,39 @@ def load_sensor_and_event_options(bridge_id):
     Output("simple-rule-section", "style"),
     Output("composite-rule-section", "style"),
     Output("logic-operator-col", "style"),
+    Output("condition-cards-container", "children", allow_duplicate=True),
+    Output("condition-counter", "data", allow_duplicate=True),
+    Output("conditions-data-store", "data", allow_duplicate=True),
     Input("rule-composite-mode", "value"),
+    State("condition-cards-container", "children"),
+    State("condition-counter", "data"),
+    State("conditions-data-store", "data"),
+    prevent_initial_call='initial_duplicate',
 )
-def toggle_composite_mode(is_composite):
+def toggle_composite_mode(is_composite, existing_cards, counter, stored_conds):
     if is_composite:
-        return {"display": "none"}, {}, {}
+        cards = existing_cards or []
+        conds = stored_conds or []
+        cnt = counter or 0
+        
+        if cnt == 0 or len(cards) == 0:
+            new_card = _build_condition_card(0)
+            cards = [new_card]
+            conds = [{
+                "id": generate_condition_id(),
+                "sensor_channels": [],
+                "metric_type": "rms_amplitude",
+                "comparison": "greater_than",
+                "threshold": 1.0,
+                "threshold_min": -1.0,
+                "threshold_max": 1.0,
+                "duration_seconds": 5
+            }]
+            cnt = 1
+        
+        return {"display": "none"}, {}, {}, cards, cnt, conds
     else:
-        return {}, {"display": "none"}, {"display": "none"}
+        return {}, {"display": "none"}, {"display": "none"}, existing_cards, counter, stored_conds
 
 
 @callback(
@@ -1238,16 +1264,16 @@ def _compute_stats_figures(bridge_id, window_hours, priority_filter, status_filt
 
 
 @callback(
-    Output("rule-card-list", "children", allow_duplicate=True),
-    Output("alert-event-list", "children", allow_duplicate=True),
-    Output("stat-total-count", "children", allow_duplicate=True),
-    Output("priority-pie-chart", "figure", allow_duplicate=True),
-    Output("trend-line-chart", "figure", allow_duplicate=True),
+    Output("rule-card-list", "children"),
+    Output("alert-event-list", "children"),
+    Output("stat-total-count", "children"),
+    Output("priority-pie-chart", "figure"),
+    Output("trend-line-chart", "figure"),
     Input("alert-mgmt-bridge-selector", "value"),
     Input("priority-filter", "value"),
     Input("status-filter", "value"),
     Input("stats-time-window", "value"),
-    prevent_initial_call='initial_duplicate',
+    prevent_initial_call=False,
 )
 def refresh_stats_and_lists(bridge_id, priority_filter, status_filter, window_hours):
     return _compute_stats_figures(bridge_id, window_hours, priority_filter, status_filter)
@@ -1257,9 +1283,9 @@ def refresh_stats_and_lists(bridge_id, priority_filter, status_filter, window_ho
     Output("last-eval-time", "data"),
     Output("rule-card-list", "children", allow_duplicate=True),
     Output("alert-event-list", "children", allow_duplicate=True),
-    Output("stat-total-count", "children"),
-    Output("priority-pie-chart", "figure"),
-    Output("trend-line-chart", "figure"),
+    Output("stat-total-count", "children", allow_duplicate=True),
+    Output("priority-pie-chart", "figure", allow_duplicate=True),
+    Output("trend-line-chart", "figure", allow_duplicate=True),
     Output("eval-last-run", "children"),
     Output("engine-status-badge", "children"),
     Input("evaluation-interval", "n_intervals"),
@@ -1296,23 +1322,6 @@ def evaluation_loop(
     return (
         now_str, rules_html, events_html,
         total_count, pie_fig, trend_fig, last_run_label, engine_label
-    )
-
-
-@callback(
-    Output("alert-event-list", "children", allow_duplicate=True),
-    Input("priority-filter", "value"),
-    Input("status-filter", "value"),
-    Input("alert-mgmt-bridge-selector", "value"),
-    prevent_initial_call=True,
-)
-def filter_event_list(priority_filter_val, status_filter_val, bridge_id):
-    if not bridge_id:
-        return html.P("请先选择桥梁", className="text-muted text-center py-4")
-    return _render_event_list(
-        bridge_id,
-        priority_filter_val or ["high", "medium", "low"],
-        status_filter_val or ["pending", "acknowledged", "ignored"]
     )
 
 
